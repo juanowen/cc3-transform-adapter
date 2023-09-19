@@ -2,19 +2,21 @@ import { _decorator, Component, Enum, UITransform, Size, Vec2, v2, View, view, D
 import { EDITOR } from 'cc/env';
 const { ccclass, property, requireComponent } = _decorator;
 
-interface SizeParameters {
+interface TransformState {
     selfSize: Size;
     parentSize: Size;
     viewSize: Size;
+    isHorizontal: boolean,
+    sizeRatio: number;
 }
 
-enum PositionType {
+export enum PositionType {
     OriginalPosition,
     RelativeToParent,
     Absolute
 }
 
-enum ResizeMode {
+export enum ResizeMode {
     OriginalSize,
     ResizeByProps,
     ResizeByWidth,
@@ -139,30 +141,30 @@ class ResizePreset {
         return isValid ? value.replace(/\s/g, '') : '0px';
     }
 
-    _fillDimensions(input: string, params: SizeParameters): string {
+    _fillDimensions(input: string, state: TransformState): string {
         let output = input;
 
         output = output.replace(/px/g, '');
-        output = output.replace(/sw/g, `/100*${params.selfSize.width}`);
-        output = output.replace(/sh/g, `/100*${params.selfSize.height}`);
-        output = output.replace(/pw/g, `/100*${params.parentSize.width}`);
-        output = output.replace(/ph/g, `/100*${params.parentSize.height}`);
-        output = output.replace(/vw/g, `/100*${params.viewSize.width}`);
-        output = output.replace(/vh/g, `/100*${params.viewSize.height}`);
+        output = output.replace(/sw/g, `/100*${state.selfSize.width}`);
+        output = output.replace(/sh/g, `/100*${state.selfSize.height}`);
+        output = output.replace(/pw/g, `/100*${state.parentSize.width}`);
+        output = output.replace(/ph/g, `/100*${state.parentSize.height}`);
+        output = output.replace(/vw/g, `/100*${state.viewSize.width}`);
+        output = output.replace(/vh/g, `/100*${state.viewSize.height}`);
 
         return output;
     }
 
-    getContentSize(params: SizeParameters) {
-        const wFunc = this._fillDimensions(this.width, params);
-        const hFunc = this._fillDimensions(this.height, params);
+    getContentSize(state: TransformState) {
+        const wFunc = this._fillDimensions(this.width, state);
+        const hFunc = this._fillDimensions(this.height, state);
 
         return size(eval(wFunc), eval(hFunc));
     }
 
-    getPosition(params: SizeParameters) { 
-        const xFunc = this._fillDimensions(this.x, params);
-        const yFunc = this._fillDimensions(this.y, params);
+    getPosition(state: TransformState) { 
+        const xFunc = this._fillDimensions(this.x, state);
+        const yFunc = this._fillDimensions(this.y, state);
 
         return v2(eval(xFunc), eval(yFunc));
     }
@@ -211,6 +213,8 @@ export class TransformAdapter extends Component {
     private _originalSize: Size = null;
     private _parentSize: Size = null;
 
+    private _lastState: TransformState = null;
+
     onLoad() {
         this._fillPrivateProps();
         this._handleResizeEvents(true);
@@ -219,10 +223,11 @@ export class TransformAdapter extends Component {
     _handleResizeEvents(isOn: boolean) {
         const func = isOn ? 'on' : 'off';
 
-        // director[func](Director.EVENT_AFTER_SCENE_LAUNCH, this.onTransformEvent, this);
-        director[func](Director.EVENT_AFTER_UPDATE, this.onTransformEvent, this);
+        View.instance[func]('design-resolution-changed', this.onTransformEvent, this);
+        View.instance[func]('canvas-resize', this.onTransformEvent, this);
+        director[func](Director.EVENT_AFTER_SCENE_LAUNCH, this.onTransformEvent, this);
 
-        // View.instance[func]('design-resolution-changed', this.onTransformEvent, this);
+        director[func](Director.EVENT_AFTER_UPDATE, this.onAfterUpdateEvent, this);
     }
 
     _getTargetMap(ratio: number): ResizeMap {
@@ -246,21 +251,16 @@ export class TransformAdapter extends Component {
         }
     }
 
-    onTransformEvent() {
-        const viewSize: Size = view.getVisibleSize();
-        const parentSize: Size = this._parentSize ? this._parentSize : viewSize.clone();
-        const params: SizeParameters = { viewSize, parentSize, selfSize: size(0, 0) };
+    _transformNode() {   
+        if (!this._lastState) return;
         
-        const isHorizontal: boolean = viewSize.width > viewSize.height;
-        const sizeRatio: number = Math.max(viewSize.width / viewSize.height, viewSize.height / viewSize.width);
-
-        const map: ResizeMap = this._getTargetMap(sizeRatio);
+        const map: ResizeMap = this._getTargetMap(this._lastState.sizeRatio);
         if (map) {
-            const preset: ResizePreset = map[isHorizontal ? 'landscape' : 'portrait'];
+            const preset: ResizePreset = map[this._lastState.isHorizontal ? 'landscape' : 'portrait'];
             
             if (preset.resizeMode !== ResizeMode.OriginalSize) {
                 // operate size
-                const contentSize: Size = preset.getContentSize(params);  
+                const contentSize: Size = preset.getContentSize(this._lastState);  
                 switch(preset.resizeMode) {
                     case ResizeMode.ResizeByWidth: {
                         contentSize.height = this._originalSize.height / this._originalSize.width * contentSize.width;
@@ -283,12 +283,7 @@ export class TransformAdapter extends Component {
             }
             
             if (preset.positionType !== PositionType.OriginalPosition) {
-                // operate position
-                params.selfSize = size(
-                    this._transform.contentSize.width * this.node.scale.x,
-                    this._transform.contentSize.height * this.node.scale.y
-                );
-                const position = preset.getPosition(params); 
+                const position = preset.getPosition(this._lastState); 
                 
                 if (preset.positionType === PositionType.RelativeToParent) {
                     if (this.node.parent) {
@@ -299,6 +294,24 @@ export class TransformAdapter extends Component {
                 this.node.setWorldPosition(position.x, position.y, 0);
             }
         }
+    }
+
+    onTransformEvent() {
+        const viewSize: Size = view.getVisibleSize();
+        const parentSize: Size = this._parentSize ? this._parentSize : viewSize.clone();
+        const selfSize: Size = size(
+            this._transform.contentSize.width * this.node.scale.x,
+            this._transform.contentSize.height * this.node.scale.y
+        );
+        const isHorizontal: boolean = viewSize.width > viewSize.height;
+        const sizeRatio: number = Math.max(viewSize.width / viewSize.height, viewSize.height / viewSize.width);
+
+        this._lastState = { viewSize, parentSize, selfSize, isHorizontal, sizeRatio };
+        this._transformNode();
+    }
+
+    onAfterUpdateEvent() {
+        this._transformNode();
     }
 }
 
